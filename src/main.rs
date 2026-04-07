@@ -1,7 +1,8 @@
 use colored::*;
 use std::error::Error;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex};
 use tokio::task;
 use tokio::time::sleep;
 
@@ -12,7 +13,7 @@ struct Job {
 }
 
 #[derive(Debug)]
-struct Result {
+struct JobResult {
     job_id: usize,
     output: i32,
     took: Duration,
@@ -23,7 +24,7 @@ fn print_colored(label: &str, message: &str) {
     println!("{}", message.yellow());
 }
 
-async fn process(job: Job) -> Result<Result, Box<dyn Error + Send + Sync>> {
+async fn process(job: Job) -> Result<JobResult, Box<dyn Error + Send + Sync>> {
     let start = Instant::now();
     // Simulate work by sleeping random duration up to 50 ms
     let sleep_duration = rand::random::<u64>() % 50;
@@ -33,7 +34,7 @@ async fn process(job: Job) -> Result<Result, Box<dyn Error + Send + Sync>> {
         return Err(format!("Negative value for job {}", job.id).into());
     }
 
-    Ok(Result {
+    Ok(JobResult {
         job_id: job.id,
         output: job.value * job.value,
         took: start.elapsed(),
@@ -43,32 +44,42 @@ async fn process(job: Job) -> Result<Result, Box<dyn Error + Send + Sync>> {
 async fn run_pipeline(
     jobs: Vec<Job>,
     workers: usize,
-) -> Result<Vec<Result>, Box<dyn Error + Send + Sync>> {
-    let (job_tx, mut job_rx) = mpsc::channel::<Job>(jobs.len());
-    let (result_tx, mut result_rx) = mpsc::channel::<Result>(jobs.len());
+) -> Result<Vec<JobResult>, Box<dyn Error + Send + Sync>> {
+    let (job_tx, job_rx) = mpsc::channel::<Job>(jobs.len());
+    let (result_tx, mut result_rx) = mpsc::channel::<JobResult>(jobs.len());
 
     // Send all jobs
     for job in jobs {
         job_tx.send(job).await.map_err(|_| "Failed to send job")?;
     }
-    drop(job_tx); // Close sender
+    drop(job_tx); // Close sender so workers know when to stop
+
+    // Share receiver across workers via Arc<Mutex<>>
+    let job_rx = Arc::new(Mutex::new(job_rx));
 
     // Spawn worker tasks
     let mut handles = Vec::new();
     for _ in 0..workers {
-        let mut job_rx = job_rx.clone();
+        let job_rx = Arc::clone(&job_rx);
         let result_tx = result_tx.clone();
         let handle = task::spawn(async move {
-            while let Some(job) = job_rx.recv().await {
-                match process(job).await {
-                    Ok(res) => {
-                        if result_tx.send(res).await.is_err() {
-                            break;
+            loop {
+                let job = {
+                    let mut rx = job_rx.lock().await;
+                    rx.recv().await
+                };
+                match job {
+                    Some(job) => match process(job).await {
+                        Ok(res) => {
+                            if result_tx.send(res).await.is_err() {
+                                break;
+                            }
                         }
-                    }
-                    Err(e) => {
-                        return Err(e);
-                    }
+                        Err(e) => {
+                            return Err(e);
+                        }
+                    },
+                    None => break,
                 }
             }
             Ok::<(), Box<dyn Error + Send + Sync>>(())
@@ -113,7 +124,6 @@ async fn main() {
         }
         Err(e) => {
             eprintln!("Error running pipeline: {}", e);
-            return;
         }
     }
 }
