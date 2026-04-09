@@ -83,29 +83,43 @@ jobs:
           cat /tmp/pr-description.txt
           echo "=========================="
 
+      - name: Collect Rust source
+        run: |
+          RUST_CODE=""
+          for f in $(find src -name '*.rs' 2>/dev/null); do
+            RUST_CODE="$RUST_CODE
+          // FILE: $f
+          $(cat "$f")
+          "
+          done
+          echo "$RUST_CODE" > /tmp/rust_code.txt
+
       - name: Analyze and fix with GitHub model
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          CARGO_ERRORS=$(cat /tmp/cargo-errors.txt)
-          PR_PLAN=$(cat /tmp/pr-description.txt)
-
           python3 -c "
           import json
 
           errors = open('/tmp/cargo-errors.txt').read()
           plan = open('/tmp/pr-description.txt').read()
+          rust_code = open('/tmp/rust_code.txt').read()
 
           user_content = 'The cargo check step failed after applying translated Go-to-Rust changes.\n\n'
 
           if plan.strip():
             user_content += '## Intended change plan (from the Go repo PR description)\n'
             user_content += 'Use this as the authoritative guide for what the code should do. '
-            user_content += 'Fix the compilation errors in a way that aligns with this plan, not just the minimal syntactic patch.\n\n'
+            user_content += 'Fix the compilation errors in a way that aligns with this plan.\n\n'
             user_content += plan + '\n\n'
 
+          user_content += '## Current Rust source\n' + rust_code + '\n\n'
           user_content += '## Compiler errors\n' + errors + '\n\n'
-          user_content += 'Return only the fix as a unified git diff patch. No commentary.'
+          user_content += (
+            'Return ONLY a JSON object mapping relative file paths to their full fixed content. '
+            'Example: {\"src/main.rs\": \"fn main() { ... }\"}\n'
+            'No markdown, no commentary, no code fences — raw JSON only.'
+          )
 
           payload = {
             'model': 'openai/gpt-4.1-mini',
@@ -115,9 +129,10 @@ jobs:
                 'role': 'system',
                 'content': (
                   'You are a Rust compiler expert. '
-                  'You receive a step-by-step change plan (the intended behavior) and the actual cargo check errors. '
+                  'You receive the current Rust source, a step-by-step change plan (intended behavior), '
+                  'and the actual cargo check errors. '
                   'Fix the errors so the code compiles AND matches the intent of the change plan. '
-                  'Output ONLY a unified git diff patch with no additional text.'
+                  'Respond with ONLY a raw JSON object mapping file paths to their complete fixed content.'
                 )
               },
               {'role': 'user', 'content': user_content}
@@ -132,15 +147,38 @@ jobs:
             -d @/tmp/payload.json)
 
           echo "$RESPONSE" | jq -r '.choices[0].message.content // empty' > /tmp/ai-response.txt
+          echo "===== AI RESPONSE ====="
           cat /tmp/ai-response.txt
+          echo "======================="
 
-          if ! grep -q '^diff --git' /tmp/ai-response.txt; then
-            echo "No patch found in model response." >&2
-            exit 1
-          fi
+          # Strip optional markdown code fences then write files
+          python3 -c "
+          import json, os
 
-          sed -n '/^diff --git/,$p' /tmp/ai-response.txt > /tmp/patch.diff
-          git apply /tmp/patch.diff
+          content = open('/tmp/ai-response.txt').read().strip()
+          # Strip fences if the model wrapped output anyway
+          if content.startswith('\`\`\`'):
+            content = '\n'.join(content.split('\n')[1:])
+          if content.endswith('\`\`\`'):
+            content = '\n'.join(content.split('\n')[:-1])
+          content = content.strip()
+
+          try:
+            files = json.loads(content)
+          except json.JSONDecodeError as e:
+            print(f'Failed to parse AI response as JSON: {e}')
+            exit(1)
+
+          if not files:
+            print('AI returned empty file map — no changes to apply.')
+            exit(1)
+
+          for path, code in files.items():
+            os.makedirs(os.path.dirname(path) if os.path.dirname(path) else '.', exist_ok=True)
+            with open(path, 'w') as f:
+              f.write(code)
+            print(f'Written: {path}')
+          "
 
       - name: Create fix PR
         if: success()

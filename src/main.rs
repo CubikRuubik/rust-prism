@@ -24,14 +24,8 @@ fn print_colored(label: &str, message: &str) {
     println!("{}", message.yellow());
 }
 
-fn compute_priority(job: &Job) -> u32 {
-    // Priority based on absolute value — higher magnitude jobs run first
-    job.value.unsigned_abs() * 10
-}
-
 async fn process(job: Job) -> Result<JobResult, Box<dyn Error + Send + Sync>> {
     let start = Instant::now();
-    let _priority = compute_priority(&job);
     // Simulate work by sleeping random duration up to 50 ms
     let sleep_duration = rand::random::<u64>() % 50;
     sleep(Duration::from_millis(sleep_duration)).await;
@@ -40,12 +34,9 @@ async fn process(job: Job) -> Result<JobResult, Box<dyn Error + Send + Sync>> {
         return Err(format!("Negative value for job {}", job.id).into());
     }
 
-    // BUG: wrong type — output should be i32 but we're assigning a &str
-    let output: i32 = "not a number";
-
     Ok(JobResult {
         job_id: job.id,
-        output,
+        output: job.value * job.value,
         took: start.elapsed(),
     })
 }
@@ -136,6 +127,7 @@ async fn main() {
         Job { id: 2, value: 7 },
         Job { id: 3, value: 5 },
         Job { id: 4, value: 2 },
+        Job { id: , value: 2 },
     ];
 
     match run_pipeline(jobs.clone(), 2).await {
