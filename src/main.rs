@@ -8,13 +8,13 @@ use tokio::time::sleep;
 
 #[derive(Debug, Clone)]
 struct Job {
-    id: usize,
+    id: i32,
     value: i32,
 }
 
 #[derive(Debug)]
 struct JobResult {
-    job_id: usize,
+    job_id: i32,
     output: i32,
     took: Duration,
 }
@@ -127,7 +127,7 @@ async fn main() {
         Job { id: 2, value: 7 },
         Job { id: 3, value: 5 },
         Job { id: 4, value: 2 },
-        Job { id: 4, value: 2 },
+        Job { id: 5, value: 2 },
         Job { id: -5, value: -1 }, // This will cause an error
     ];
 
@@ -137,7 +137,7 @@ async fn main() {
                 println!(
                     "job {}: {}² = {} (took {:?})",
                     r.job_id,
-                    jobs[r.job_id - 1].value,
+                    jobs.iter().find(|j| j.id == r.job_id).map(|j| j.value).unwrap_or(0),
                     r.output,
                     r.took
                 );
