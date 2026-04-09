@@ -119,7 +119,13 @@ async fn main() {
     match run_pipeline(jobs.clone(), 2).await {
         Ok(results) => {
             for r in results {
-                println!("job {}: {}² = {} (took {:?})", r.job_id, jobs[r.job_id - 1].value, r.output, r.took);
+                println!(
+                    "job {}: {}² = {} (took {:?})",
+                    r.job_id,
+                    jobs[r.job_id - 1].value,
+                    r.output,
+                    r.took
+                );
             }
         }
         Err(e) => {

@@ -1,0 +1,180 @@
+name: Cargo Check & Auto-Fix
+
+on:
+  pull_request:
+    branches: [main, dev]
+
+jobs:
+  cargo-check:
+    name: Check compilation
+    runs-on: ubuntu-latest
+    outputs:
+      failed: ${{ steps.check.outcome == 'failure' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Run cargo check
+        id: check
+        run: cargo check
+        continue-on-error: true
+
+      - name: Save error output
+        if: steps.check.outcome == 'failure'
+        run: cargo check 2> /tmp/cargo-errors.txt || true
+
+      - name: Upload error artifact
+        if: steps.check.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: cargo-errors
+          path: /tmp/cargo-errors.txt
+
+      - name: Fail job if check failed
+        if: steps.check.outcome == 'failure'
+        run: exit 1
+
+  auto-fix:
+    name: AI auto-fix
+    needs: cargo-check
+    if: failure() && needs.cargo-check.outputs.failed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Download error artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: cargo-errors
+          path: /tmp
+
+      - name: Fetch PR description (change plan)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_BODY=$(curl -s \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}" \
+            | jq -r '.body // ""')
+          echo "$PR_BODY" > /tmp/pr-description.txt
+          echo "===== PR DESCRIPTION ====="
+          cat /tmp/pr-description.txt
+          echo "=========================="
+
+      - name: Analyze and fix with GitHub model
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          CARGO_ERRORS=$(cat /tmp/cargo-errors.txt)
+          PR_PLAN=$(cat /tmp/pr-description.txt)
+
+          python3 -c "
+          import json
+
+          errors = open('/tmp/cargo-errors.txt').read()
+          plan = open('/tmp/pr-description.txt').read()
+
+          user_content = 'The cargo check step failed after applying translated Go-to-Rust changes.\n\n'
+
+          if plan.strip():
+            user_content += '## Intended change plan (from the Go repo PR description)\n'
+            user_content += 'Use this as the authoritative guide for what the code should do. '
+            user_content += 'Fix the compilation errors in a way that aligns with this plan, not just the minimal syntactic patch.\n\n'
+            user_content += plan + '\n\n'
+
+          user_content += '## Compiler errors\n' + errors + '\n\n'
+          user_content += 'Return only the fix as a unified git diff patch. No commentary.'
+
+          payload = {
+            'model': 'openai/gpt-4.1-mini',
+            'temperature': 0,
+            'messages': [
+              {
+                'role': 'system',
+                'content': (
+                  'You are a Rust compiler expert. '
+                  'You receive a step-by-step change plan (the intended behavior) and the actual cargo check errors. '
+                  'Fix the errors so the code compiles AND matches the intent of the change plan. '
+                  'Output ONLY a unified git diff patch with no additional text.'
+                )
+              },
+              {'role': 'user', 'content': user_content}
+            ]
+          }
+          print(json.dumps(payload))
+          " > /tmp/payload.json
+
+          RESPONSE=$(curl -s -X POST "https://models.github.ai/inference/chat/completions" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d @/tmp/payload.json)
+
+          echo "$RESPONSE" | jq -r '.choices[0].message.content // empty' > /tmp/ai-response.txt
+          cat /tmp/ai-response.txt
+
+          if ! grep -q '^diff --git' /tmp/ai-response.txt; then
+            echo "No patch found in model response." >&2
+            exit 1
+          fi
+
+          sed -n '/^diff --git/,$p' /tmp/ai-response.txt > /tmp/patch.diff
+          git apply /tmp/patch.diff
+
+      - name: Create fix PR
+        if: success()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Only proceed if Claude made changes
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "No changes made by Claude — skipping PR creation."
+            exit 0
+          fi
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          FIX_BRANCH="auto-fix/cargo-check-${{ github.run_id }}"
+          git checkout -b "$FIX_BRANCH"
+          git add -A
+          git commit -m "fix: resolve cargo check compilation errors [auto-fix]"
+          git push origin "$FIX_BRANCH"
+
+          gh pr create \
+            --title "fix: resolve cargo check compilation errors" \
+            --body "$(cat <<'EOF'
+          ## Automated compilation fix
+
+          `cargo check` failed on PR #${{ github.event.pull_request.number }}.
+          This PR was created automatically by Claude after analyzing the compiler errors.
+
+          **Base PR:** #${{ github.event.pull_request.number }}
+          **CI run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+          Please review the changes before merging.
+          EOF
+          )" \
+            --base "${{ github.head_ref }}" \
+            --label "auto-fix"
