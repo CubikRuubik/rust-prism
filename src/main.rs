@@ -115,6 +115,54 @@ async fn run_pipeline(
     Ok(results)
 }
 
+struct PipelineStats {
+    total: usize,
+    min_took: Duration,
+    max_took: Duration,
+    avg_took: Duration,
+}
+
+fn compute_stats(results: &[JobResult]) -> PipelineStats {
+    if results.is_empty() {
+        return PipelineStats {
+            total: 0,
+            min_took: Duration::ZERO,
+            max_took: Duration::ZERO,
+            avg_took: Duration::ZERO,
+        };
+    }
+
+    let mut min = results[0].took;
+    let mut max = results[0].took;
+    let mut sum = Duration::ZERO;
+
+    for r in results {
+        if r.took < min {
+            min = r.took;
+        }
+        if r.took > max {
+            max = r.took;
+        }
+        sum += r.took;
+    }
+
+    let avg = sum / (results.len() as u32);
+
+    PipelineStats {
+        total: results.len(),
+        min_took: min,
+        max_took: max,
+        avg_took: avg,
+    }
+}
+
+fn print_stats(s: &PipelineStats) {
+    println!(
+        "Summary: total jobs = {}, min took = {:?}, max took = {:?}, avg took = {:?}",
+        s.total, s.min_took, s.max_took, s.avg_took
+    );
+}
+
 #[tokio::main]
 async fn main() {
     println!("Hello, World!");
@@ -132,7 +180,7 @@ async fn main() {
 
     match run_pipeline(jobs.clone(), 2).await {
         Ok(results) => {
-            for r in results {
+            for r in &results {
                 println!(
                     "job {}: {}² = {} (took {:?})",
                     r.job_id,
@@ -141,6 +189,8 @@ async fn main() {
                     r.took
                 );
             }
+            let stats = compute_stats(&results);
+            print_stats(&stats);
         }
         Err(e) => {
             eprintln!("Error running pipeline: {}", e);
