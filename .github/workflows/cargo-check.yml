@@ -90,37 +90,26 @@ jobs:
           errors = open('/tmp/cargo-errors.txt').read()
           plan = open('/tmp/pr-description.txt').read()
           rust_code = open('/tmp/rust_code.txt').read()
-
-          user_content = 'The cargo check step failed after applying translated Go-to-Rust changes.\n\n'
+          system_prompt = open('.github/prompts/fix_rust_system.txt').read()
+          user_template = open('.github/prompts/fix_rust_user.txt').read()
 
           if plan.strip():
-            user_content += '## Intended change plan (from the Go repo PR description)\n'
-            user_content += 'Use this as the authoritative guide for what the code should do. '
-            user_content += 'Fix the compilation errors in a way that aligns with this plan.\n\n'
-            user_content += plan + '\n\n'
+            plan_section = '## Intended change plan (from the Go repo PR description)\n' \
+              'Use this as the authoritative guide for what the code should do. ' \
+              'Fix the compilation errors in a way that aligns with this plan.\n\n' + plan
+          else:
+            plan_section = ''
 
-          user_content += '## Current Rust source\n' + rust_code + '\n\n'
-          user_content += '## Compiler errors\n' + errors + '\n\n'
-          user_content += (
-            'Return ONLY a JSON object mapping relative file paths to their full fixed content. '
-            'Example: {\"src/main.rs\": \"fn main() { ... }\"}\n'
-            'No markdown, no commentary, no code fences — raw JSON only.'
-          )
+          user_content = user_template \
+            .replace('CHANGE_PLAN_PLACEHOLDER', plan_section) \
+            .replace('RUST_CODE_PLACEHOLDER', rust_code) \
+            .replace('ERRORS_PLACEHOLDER', errors)
 
           payload = {
             'model': 'openai/gpt-4.1-mini',
             'temperature': 0,
             'messages': [
-              {
-                'role': 'system',
-                'content': (
-                  'You are a Rust compiler expert. '
-                  'You receive the current Rust source, a step-by-step change plan (intended behavior), '
-                  'and the actual cargo check errors. '
-                  'Fix the errors so the code compiles AND matches the intent of the change plan. '
-                  'Respond with ONLY a raw JSON object mapping file paths to their complete fixed content.'
-                )
-              },
+              {'role': 'system', 'content': system_prompt},
               {'role': 'user', 'content': user_content}
             ]
           }
@@ -165,6 +154,9 @@ jobs:
               f.write(code)
             print(f'Written: {path}')
           "
+
+      - name: Verify fix compiles
+        run: cargo check
 
       - name: Commit fix to PR branch
         if: success()
