@@ -69,16 +69,29 @@ async fn run_pipeline(
                     rx.recv().await
                 };
                 match job {
-                    Some(job) => match process(job).await {
-                        Ok(res) => {
-                            if result_tx.send(res).await.is_err() {
-                                break;
+                    Some(job) => {
+                        // First attempt
+                        match process(job.clone()).await {
+                            Ok(res) => {
+                                if result_tx.send(res).await.is_err() {
+                                    break;
+                                }
+                            }
+                            Err(_) => {
+                                // Retry once
+                                match process(job).await {
+                                    Ok(res) => {
+                                        if result_tx.send(res).await.is_err() {
+                                            break;
+                                        }
+                                    }
+                                    Err(e) => {
+                                        return Err(e);
+                                    }
+                                }
                             }
                         }
-                        Err(e) => {
-                            return Err(e);
-                        }
-                    },
+                    }
                     None => break,
                 }
             }
