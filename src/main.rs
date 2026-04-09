@@ -127,7 +127,7 @@ async fn main() {
         Job { id: 2, value: 7 },
         Job { id: 3, value: 5 },
         Job { id: 4, value: 2 },
-        Job { id: , value: 2 },
+        Job { id: 5, value: 2 },
     ];
 
     match run_pipeline(jobs.clone(), 2).await {
