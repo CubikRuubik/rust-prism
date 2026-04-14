@@ -123,7 +123,7 @@ jobs:
             exit(0)
 
           for path, code in files.items():
-            os.makedirs(os.path.dirname(path) if os.path.dirname(path) else '.', exist_ok=True)
+            os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
             with open(path, 'w') as f:
               f.write(code)
             print(f'Written: {path}')
