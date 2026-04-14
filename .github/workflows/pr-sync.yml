@@ -1,0 +1,147 @@
+name: PR Sync from Go Repo
+
+on:
+  pull_request:
+    types: [opened]
+    branches: [main, dev]
+
+jobs:
+  sync:
+    name: Apply Go changes to Rust
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      models: read
+      pull-requests: read
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Fetch PR description
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_BODY=$(curl -s \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}" \
+            | jq -r '.body // ""')
+          echo "$PR_BODY" > /tmp/pr-description.txt
+          echo "===== PR DESCRIPTION ====="
+          cat /tmp/pr-description.txt
+          echo "=========================="
+
+      - name: Check PR description is non-empty
+        run: |
+          if [ ! -s /tmp/pr-description.txt ]; then
+            echo "PR description is empty — nothing to sync."
+            exit 0
+          fi
+
+      - name: Collect Rust source
+        run: |
+          RUST_CODE=""
+          for f in $(find src -name '*.rs' 2>/dev/null); do
+            RUST_CODE="$RUST_CODE
+          // FILE: $f
+          $(cat "$f")
+          "
+          done
+          echo "$RUST_CODE" > /tmp/rust_code.txt
+
+      - name: Apply changes with GitHub model
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 -c "
+          import json
+
+          plan = open('/tmp/pr-description.txt').read()
+          rust_code = open('/tmp/rust_code.txt').read()
+          system_prompt = open('.github/prompts/sync_system.txt').read()
+          user_template = open('.github/prompts/sync_user.txt').read()
+
+          user_content = user_template \
+            .replace('CHANGE_PLAN_PLACEHOLDER', plan) \
+            .replace('RUST_CODE_PLACEHOLDER', rust_code)
+
+          payload = {
+            'model': 'openai/gpt-4.1-mini',
+            'temperature': 0,
+            'messages': [
+              {'role': 'system', 'content': system_prompt},
+              {'role': 'user', 'content': user_content}
+            ]
+          }
+          print(json.dumps(payload))
+          " > /tmp/payload.json
+
+          RESPONSE=$(curl -s -X POST "https://models.github.ai/inference/chat/completions" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d @/tmp/payload.json)
+
+          echo "$RESPONSE" | jq -r '.choices[0].message.content // empty' > /tmp/ai-response.txt
+          echo "===== AI RESPONSE ====="
+          cat /tmp/ai-response.txt
+          echo "======================="
+
+          python3 -c "
+          import json, os
+
+          content = open('/tmp/ai-response.txt').read().strip()
+          if content.startswith('\`\`\`'):
+            content = '\n'.join(content.split('\n')[1:])
+          if content.endswith('\`\`\`'):
+            content = '\n'.join(content.split('\n')[:-1])
+          content = content.strip()
+
+          try:
+            files = json.loads(content)
+          except json.JSONDecodeError as e:
+            print(f'Failed to parse AI response as JSON: {e}')
+            exit(1)
+
+          if not files:
+            print('AI returned empty file map — no changes to apply.')
+            exit(0)
+
+          for path, code in files.items():
+            os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
+            with open(path, 'w') as f:
+              f.write(code)
+            print(f'Written: {path}')
+          "
+
+      - name: Run cargo check
+        run: cargo check
+
+      - name: Commit synced changes to PR branch
+        run: |
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "No changes — skipping commit."
+            exit 0
+          fi
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add -A
+          git commit -m "sync: apply changes from Go repo PR description [auto-sync]"
+          git push origin HEAD:${{ github.head_ref }}
