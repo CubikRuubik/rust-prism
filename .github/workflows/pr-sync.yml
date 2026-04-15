@@ -1,14 +1,8 @@
 name: PR Sync from Go Repo
 
 on:
-  workflow_dispatch:
-    inputs:
-      branch:
-        description: 'PR head branch to sync'
-        required: true
-      pr_number:
-        description: 'Pull Request number'
-        required: true
+  pull_request:
+    types: [opened]
 
 jobs:
   sync:
@@ -22,7 +16,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.branch }}
+          ref: ${{ github.head_ref }}
           fetch-depth: 0
 
       - name: Install Rust toolchain
@@ -38,16 +32,11 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
-      - name: Fetch PR description
+      - name: Write PR description to file
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_BODY: ${{ github.event.pull_request.body }}
         run: |
-          PR_BODY=$(curl -s \
-            -H "Authorization: Bearer $GITHUB_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${{ github.repository }}/pulls/${{ github.event.inputs.pr_number }}" \
-            | jq -r '.body // ""')
-          echo "$PR_BODY" > /tmp/pr-description.txt
+          printf '%s' "$PR_BODY" > /tmp/pr-description.txt
           echo "===== PR DESCRIPTION ====="
           cat /tmp/pr-description.txt
           echo "=========================="
@@ -149,4 +138,4 @@ jobs:
 
           git add -A
           git commit -m "sync: apply changes from Go repo PR description [auto-sync]"
-          git push origin HEAD:${{ github.event.inputs.branch }}
+          git push origin HEAD:${{ github.head_ref }}
