@@ -13,8 +13,7 @@ network:
     - defaults
     - rust
 safe-outputs:
-  create-pull-request:
-    max: 1
+  push-to-pull-request-branch:
   add-comment:
     max: 1
   noop:
@@ -31,7 +30,7 @@ The triggering pull request contains the required change description, produced b
 1. Read and understand the triggering pull request description, title, and relevant discussion context.
 2. Apply only the requested Rust-side changes in this repository.
 3. Verify the updated code compiles.
-4. If successful, propose the changes as a pull request.
+4. If successful, push the changes directly to the triggering PR branch.
 
 ## Implementation Rules
 
@@ -63,11 +62,10 @@ When you finish:
      - The exact failing check(s)
      - Next action required from maintainers
 3. If changes are made and checks pass:
-   - Use `create-pull-request` with:
-     - Title format: `[rust-sync] Apply requested changes from PR #<number>`
+   - Push the changes directly to the triggering PR branch using `push-to-pull-request-branch`.
+   - Call `add-comment` on the triggering PR with:
      - A concise summary of implemented changes
      - Validation output summary for `cargo check` and `cargo test`
-     - A link back to the triggering PR
 
 ## Safety
 
